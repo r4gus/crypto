@@ -9,6 +9,8 @@ Cryptographic algorithms in [Zig](https://ziglang.org/).
   - [ ] ECVRF-P256-SHA256-SSWU
   - [ ] ECVRF-EDWARDS25519-SHA512-TAI
   - [ ] ECVRF-EDWARDS25519-SHA512-ELL2
+- Zero-Knowledge Proof
+  - [ ] Schnorr Non-interactive Zero-Knowledge Proof [RFC 8235](https://datatracker.ietf.org/doc/html/rfc8235)
 
 ### Verifiable Random Functions (VRFs)
 
