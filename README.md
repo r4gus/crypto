@@ -11,6 +11,8 @@ Cryptographic algorithms in [Zig](https://ziglang.org/).
   - [ ] ECVRF-EDWARDS25519-SHA512-ELL2
 - Zero-Knowledge Proof
   - [ ] Schnorr Non-interactive Zero-Knowledge Proof [RFC 8235](https://datatracker.ietf.org/doc/html/rfc8235)
+- Deterministic Random Bit Generator (DRBG)
+  - [ ] XDRBG [iacr](https://tosc.iacr.org/index.php/ToSC/article/view/11399)
 
 ### Verifiable Random Functions (VRFs)
 
