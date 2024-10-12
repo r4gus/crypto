@@ -88,346 +88,362 @@ const crypto = std.crypto;
 const IdentityElementError = crypto.errors.IdentityElementError;
 const NonCanonicalError = crypto.errors.NonCanonicalError;
 
-/// ECVRF-P256-SHA256-TAI as defined by [RFC9381](https://datatracker.ietf.org/doc/rfc9381/)
-pub const EcvrfP256Sha256Tai = struct {
-    pub const suite_string = "\x01";
-    pub const Curve = crypto.ecc.P256;
-    pub const Hash = crypto.hash.sha2.Sha256;
+/// ECVRF-P256-SHA256-TAI
+pub const EcvrfP256Sha256Tai = Ecvrf(
+    crypto.ecc.P256,
+    crypto.hash.sha2.Sha256,
+    "\x01",
+    ecvrfP256Sha256TaiEncodeToCurve,
+);
 
-    const HMAC_K = std.crypto.auth.hmac.Hmac(Hash);
+// ECVRF as defined by [RFC9381](https://datatracker.ietf.org/doc/rfc9381/)
+pub fn Ecvrf(
+    comptime _Curve: type,
+    comptime _Hash: type,
+    comptime _suite_string: []const u8,
+    comptime _encodeToCurve: fn (salt: []const u8, alpha: []const u8, suite_string: []const u8) error{NoCurve}!_Curve,
+) type {
+    return struct {
+        const Curve = _Curve;
+        const Hash = _Hash;
+        const suite_string = _suite_string;
+        const HMAC_K = std.crypto.auth.hmac.Hmac(Hash);
 
-    /// The length of the prime order of the group in octets.
-    const qLen = Curve.scalar.encoded_length;
-    /// Length, in octets, of a challenge value used by the VRF.
-    const cLen = qLen / 2;
-    const ptLen = 1 + Curve.Fe.encoded_length;
-    const hLen = Hash.digest_length;
-    pub const Pi = [ptLen + cLen + qLen]u8;
-    pub const Beta = [hLen]u8;
+        /// The length of the prime order of the group in octets.
+        const qLen = Curve.scalar.encoded_length;
+        /// Length, in octets, of a challenge value used by the VRF.
+        const cLen = qLen / 2;
+        const ptLen = 1 + Curve.Fe.encoded_length;
+        const hLen = Hash.digest_length;
+        pub const Pi = [ptLen + cLen + qLen]u8;
+        pub const Beta = [hLen]u8;
 
-    /// An ECVRF secret key.
-    pub const SecretKey = struct {
-        /// Length (in bytes) of a raw secret key.
-        pub const encoded_length = Curve.scalar.encoded_length;
+        /// An ECVRF secret key.
+        pub const SecretKey = struct {
+            /// Length (in bytes) of a raw secret key.
+            pub const encoded_length = Curve.scalar.encoded_length;
 
-        bytes: Curve.scalar.CompressedScalar,
+            bytes: Curve.scalar.CompressedScalar,
 
-        pub fn fromBytes(bytes: [encoded_length]u8) !SecretKey {
-            return SecretKey{ .bytes = bytes };
-        }
-
-        pub fn toBytes(sk: SecretKey) [encoded_length]u8 {
-            return sk.bytes;
-        }
-
-        /// TFC6979 (3.2)
-        pub fn nonceGeneration(sk: SecretKey, m: []const u8) Curve.scalar.CompressedScalar {
-            var h1: [Hash.digest_length]u8 = undefined;
-            Hash.hash(m, &h1, .{});
-            var V: [Hash.digest_length]u8 = .{1} ** Hash.digest_length;
-            var K: [Hash.digest_length]u8 = .{0} ** Hash.digest_length;
-
-            // K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
-            var mac = HMAC_K.init(&K);
-            mac.update(&V);
-            mac.update("\x00");
-            mac.update(&sk.toBytes());
-            mac.update(&h1);
-            mac.final(&K);
-
-            // V = HMAC_K(V)
-            HMAC_K.create(&V, &V, &K);
-
-            // K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
-            mac = HMAC_K.init(&K);
-            mac.update(&V);
-            mac.update("\x01");
-            mac.update(&sk.toBytes());
-            mac.update(&h1);
-            mac.final(&K);
-
-            // V = HMAC_K(V)
-            HMAC_K.create(&V, &V, &K);
-
-            while (true) {
-                // NOTE: tlen = qlen = 256 bits, i.e. we don't need the inner loop!
-                var TV: [HMAC_K.mac_length]u8 = undefined;
-                HMAC_K.create(&TV, &V, &K);
-                const T: Curve.scalar.CompressedScalar = TV;
-                Curve.Fe.rejectNonCanonical(T, .big) catch {
-                    // K = HMAC_K(V || 0x00)
-                    mac = HMAC_K.init(&K);
-                    mac.update(&V);
-                    mac.update("\x00");
-                    mac.final(&K);
-
-                    // V = HMAC_K(V)
-                    HMAC_K.create(&V, &V, &K);
-
-                    continue;
-                };
-                return T;
+            pub fn fromBytes(bytes: [encoded_length]u8) !SecretKey {
+                return SecretKey{ .bytes = bytes };
             }
-        }
-    };
 
-    /// An ECVRF public key.
-    pub const PublicKey = struct {
-        p: Point,
+            pub fn toBytes(sk: SecretKey) [encoded_length]u8 {
+                return sk.bytes;
+            }
 
-        pub fn pointToString(pk: PublicKey) [ptLen]u8 {
-            return pk.p.toCompressedSec1();
-        }
+            /// TFC6979 (3.2)
+            pub fn nonceGeneration(sk: SecretKey, m: []const u8) Curve.scalar.CompressedScalar {
+                var h1: [Hash.digest_length]u8 = undefined;
+                Hash.hash(m, &h1, .{});
+                var V: [Hash.digest_length]u8 = .{1} ** Hash.digest_length;
+                var K: [Hash.digest_length]u8 = .{0} ** Hash.digest_length;
 
-        pub fn verify(
-            pk: PublicKey,
-            alpha: []const u8,
-            pi_string: Pi,
-            encode_to_curve_salt: ?[]const u8,
-        ) !Beta {
-            _ = encode_to_curve_salt;
-            const D = try DecodedProof.decodeProof(pi_string);
-            const H = try helper.encodeToCurve(&pk.pointToString(), alpha);
-            const sB = try Curve.basePoint.mul(D.s, .big);
-            const cY = try pk.p.p.mul(D.c, .big);
-            const U = sB.sub(cY);
+                // K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+                var mac = HMAC_K.init(&K);
+                mac.update(&V);
+                mac.update("\x00");
+                mac.update(&sk.toBytes());
+                mac.update(&h1);
+                mac.final(&K);
 
-            const sH = try H.p.mul(D.s, .big);
-            const cGamma = try D.Gamma.p.mul(D.c, .big);
-            const V = sH.sub(cGamma);
+                // V = HMAC_K(V)
+                HMAC_K.create(&V, &V, &K);
 
-            const ctick = helper.challengeGeneration(
-                pk.p,
-                H,
-                D.Gamma,
-                Point{ .p = U },
-                Point{ .p = V },
-            );
+                // K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+                mac = HMAC_K.init(&K);
+                mac.update(&V);
+                mac.update("\x01");
+                mac.update(&sk.toBytes());
+                mac.update(&h1);
+                mac.final(&K);
 
-            if (!std.mem.eql(u8, D.c[0..], ctick[0..])) return error.Invalid;
-            return try proofToHash(pi_string);
-        }
-    };
+                // V = HMAC_K(V)
+                HMAC_K.create(&V, &V, &K);
 
-    /// An ECVRF point.
-    pub const Point = struct {
-        /// Length (in bytes) of a compressed sec1-encoded point.
-        pub const compressed_sec1_encoded_length = 1 + Curve.Fe.encoded_length;
-        /// Length (in bytes) of a compressed sec1-encoded point.
-        pub const uncompressed_sec1_encoded_length = 1 + 2 * Curve.Fe.encoded_length;
+                while (true) {
+                    // NOTE: tlen = qlen = 256 bits, i.e. we don't need the inner loop!
+                    var TV: [HMAC_K.mac_length]u8 = undefined;
+                    HMAC_K.create(&TV, &V, &K);
+                    const T: Curve.scalar.CompressedScalar = TV;
+                    Curve.Fe.rejectNonCanonical(T, .big) catch {
+                        // K = HMAC_K(V || 0x00)
+                        mac = HMAC_K.init(&K);
+                        mac.update(&V);
+                        mac.update("\x00");
+                        mac.final(&K);
 
-        p: Curve,
+                        // V = HMAC_K(V)
+                        HMAC_K.create(&V, &V, &K);
 
-        /// Create a public key from a SEC-1 representation.
-        pub fn fromSec1(sec1: []const u8) !PublicKey {
-            return PublicKey{ .p = try Curve.fromSec1(sec1) };
-        }
+                        continue;
+                    };
+                    return T;
+                }
+            }
+        };
 
-        /// Encode the public key using the compressed SEC-1 format.
-        pub fn toCompressedSec1(point: Point) [compressed_sec1_encoded_length]u8 {
-            return point.p.toCompressedSec1();
-        }
+        /// An ECVRF public key.
+        pub const PublicKey = struct {
+            p: Point,
 
-        /// Encoding the public key using the uncompressed SEC-1 format.
-        pub fn toUncompressedSec1(point: Point) [uncompressed_sec1_encoded_length]u8 {
-            return point.p.toUncompressedSec1();
-        }
+            pub fn pointToString(pk: PublicKey) [ptLen]u8 {
+                return pk.p.toCompressedSec1();
+            }
 
-        pub fn pointToString(point: Point) [ptLen]u8 {
-            return point.p.toCompressedSec1();
-        }
+            pub fn verify(
+                pk: PublicKey,
+                alpha: []const u8,
+                pi_string: Pi,
+                encode_to_curve_salt: ?[]const u8,
+            ) !Beta {
+                _ = encode_to_curve_salt;
+                const D = try DecodedProof.decodeProof(pi_string);
+                const H = try _encodeToCurve(&pk.pointToString(), alpha, suite_string);
+                const sB = try Curve.basePoint.mul(D.s, .big);
+                const cY = try pk.p.p.mul(D.c, .big);
+                const U = sB.sub(cY);
 
-        pub fn stringToPoint(s: [ptLen]u8) !Point {
-            return Point{ .p = try Curve.fromSec1(&s) };
-        }
-    };
+                const sH = try H.mul(D.s, .big);
+                const cGamma = try D.Gamma.p.mul(D.c, .big);
+                const V = sH.sub(cGamma);
 
-    /// An ECVRF key pair.
-    pub const KeyPair = struct {
-        /// Public part.
-        public_key: PublicKey,
-        /// Secret scalar.
-        secret_key: SecretKey,
+                const ctick = helper.challengeGeneration(
+                    pk.p,
+                    Point{ .p = H },
+                    D.Gamma,
+                    Point{ .p = U },
+                    Point{ .p = V },
+                );
 
-        /// Create a new random key pair. `crypto.random.bytes` must be supported
-        /// for the target.
-        pub fn generate() IdentityElementError!KeyPair {
-            // Elliptic Curve Key Pair Generation Primitive (3.2.1.)
-            // https://www.secg.org/sec1-v2.pdf
-            const d = Curve.scalar.random(.big);
-            return fromSecretKey(SecretKey{ .bytes = d });
-        }
+                if (!std.mem.eql(u8, D.c[0..], ctick[0..])) return error.Invalid;
+                return try proofToHash(pi_string);
+            }
+        };
 
-        /// Return the public key corresponding to the secret key.
-        pub fn fromSecretKey(secret_key: SecretKey) IdentityElementError!KeyPair {
-            const public_key = try Curve.basePoint.mul(
-                secret_key.bytes,
-                .big,
-            );
-            return KeyPair{
-                .secret_key = secret_key,
-                .public_key = PublicKey{
-                    .p = Point{ .p = public_key },
-                },
-            };
-        }
+        /// An ECVRF point.
+        pub const Point = struct {
+            /// Length (in bytes) of a compressed sec1-encoded point.
+            pub const compressed_sec1_encoded_length = 1 + Curve.Fe.encoded_length;
+            /// Length (in bytes) of a compressed sec1-encoded point.
+            pub const uncompressed_sec1_encoded_length = 1 + 2 * Curve.Fe.encoded_length;
 
-        pub fn encodeToCurve(key_pair: KeyPair, alpha: []const u8) !Point {
-            return helper.encodeToCurve(
-                &key_pair.public_key.pointToString(),
-                alpha,
-            );
-        }
+            p: Curve,
 
-        /// Construct a proof `Pi` that `Beta` is the correct hash output.
+            /// Create a public key from a SEC-1 representation.
+            pub fn fromSec1(sec1: []const u8) !PublicKey {
+                return PublicKey{ .p = try Curve.fromSec1(sec1) };
+            }
+
+            /// Encode the public key using the compressed SEC-1 format.
+            pub fn toCompressedSec1(point: Point) [compressed_sec1_encoded_length]u8 {
+                return point.p.toCompressedSec1();
+            }
+
+            /// Encoding the public key using the uncompressed SEC-1 format.
+            pub fn toUncompressedSec1(point: Point) [uncompressed_sec1_encoded_length]u8 {
+                return point.p.toUncompressedSec1();
+            }
+
+            pub fn pointToString(point: Point) [ptLen]u8 {
+                return point.p.toCompressedSec1();
+            }
+
+            pub fn stringToPoint(s: [ptLen]u8) !Point {
+                return Point{ .p = try Curve.fromSec1(&s) };
+            }
+        };
+
+        /// An ECVRF key pair.
+        pub const KeyPair = struct {
+            /// Public part.
+            public_key: PublicKey,
+            /// Secret scalar.
+            secret_key: SecretKey,
+
+            /// Create a new random key pair. `crypto.random.bytes` must be supported
+            /// for the target.
+            pub fn generate() IdentityElementError!KeyPair {
+                // Elliptic Curve Key Pair Generation Primitive (3.2.1.)
+                // https://www.secg.org/sec1-v2.pdf
+                const d = Curve.scalar.random(.big);
+                return fromSecretKey(SecretKey{ .bytes = d });
+            }
+
+            /// Return the public key corresponding to the secret key.
+            pub fn fromSecretKey(secret_key: SecretKey) IdentityElementError!KeyPair {
+                const public_key = try Curve.basePoint.mul(
+                    secret_key.bytes,
+                    .big,
+                );
+                return KeyPair{
+                    .secret_key = secret_key,
+                    .public_key = PublicKey{
+                        .p = Point{ .p = public_key },
+                    },
+                };
+            }
+
+            pub fn encodeToCurve(key_pair: KeyPair, alpha: []const u8) !Point {
+                return Point{ .p = try _encodeToCurve(
+                    &key_pair.public_key.pointToString(),
+                    alpha,
+                    suite_string,
+                ) };
+            }
+
+            /// Construct a proof `Pi` that `Beta` is the correct hash output.
+            ///
+            /// note: salt is ignored for the given implementation.
+            pub fn prove(key_pair: KeyPair, alpha: []const u8, salt: ?[]const u8) !Pi {
+                _ = salt;
+                const H = try key_pair.encodeToCurve(alpha);
+                const h_string = H.pointToString();
+                const Gamma = Point{ .p = try H.p.mul(key_pair.secret_key.toBytes(), .big) };
+                const k = key_pair.secret_key.nonceGeneration(&h_string);
+                const U = Point{ .p = try Curve.basePoint.mul(k, .big) };
+                const V = Point{ .p = try H.p.mul(k, .big) };
+                const c = helper.challengeGeneration(key_pair.public_key.p, H, Gamma, U, V);
+                const s = try Curve.scalar.mulAdd(c, key_pair.secret_key.toBytes(), k, .big);
+
+                var pi: Pi = undefined;
+                @memcpy(pi[0..ptLen], &Gamma.pointToString());
+                @memcpy(pi[ptLen .. ptLen + cLen], c[cLen..]);
+                @memcpy(pi[ptLen + cLen .. ptLen + cLen + qLen], &s);
+
+                return pi;
+            }
+        };
+
+        /// The decoded version of a proof Pi.
+        pub const DecodedProof = struct {
+            /// A Point on the Curve
+            Gamma: Point,
+            /// An integer between 0 and 2^(8*cLen)-1
+            c: [qLen]u8,
+            /// An integer between 0 and q-1
+            s: [qLen]u8,
+
+            pub fn decodeProof(pi_string: Pi) !DecodedProof {
+                const gamma_string = pi_string[0..ptLen];
+                const c_string = pi_string[ptLen .. ptLen + cLen];
+                const s_string = pi_string[ptLen + cLen ..];
+                const Gamma = Point.stringToPoint(gamma_string.*) catch {
+                    return error.Invalid;
+                };
+                var c: [qLen]u8 = .{0} ** qLen;
+                @memcpy(c[cLen..], c_string);
+                var s: [qLen]u8 = .{0} ** qLen;
+                @memcpy(&s, s_string);
+                Curve.Fe.rejectNonCanonical(s, .big) catch {
+                    return error.Invalid;
+                };
+
+                return .{
+                    .Gamma = Gamma,
+                    .c = c,
+                    .s = s,
+                };
+            }
+        };
+
+        /// ECVRF proof to hash
         ///
-        /// note: salt is ignored for the given implementation.
-        pub fn prove(key_pair: KeyPair, alpha: []const u8, salt: ?[]const u8) !Pi {
-            _ = salt;
-            const H = try key_pair.encodeToCurve(alpha);
-            const h_string = H.pointToString();
-            const Gamma = Point{ .p = try H.p.mul(key_pair.secret_key.toBytes(), .big) };
-            const k = key_pair.secret_key.nonceGeneration(&h_string);
-            const U = Point{ .p = try Curve.basePoint.mul(k, .big) };
-            const V = Point{ .p = try H.p.mul(k, .big) };
-            const c = helper.challengeGeneration(key_pair.public_key.p, H, Gamma, U, V);
-            const s = try Curve.scalar.mulAdd(c, key_pair.secret_key.toBytes(), k, .big);
+        /// Deterministically obtain the VRF hash output `Beta` directly
+        /// from the proof value `Pi`.
+        ///
+        /// note: `proofToHash` should be run only on a pi_string value that
+        /// is known to have been produced by `prove`, or from within
+        /// `verify` as specified in Section 5.3. of RFC9381.
+        pub fn proofToHash(pi_string: Pi) !Beta {
+            const proof_to_hash_domain_separator_front = "\x03";
+            const proof_to_hash_domain_separator_back = "\x00";
+            const D = try DecodedProof.decodeProof(pi_string);
+            var beta_string: Beta = .{0} ** hLen;
 
-            var pi: Pi = undefined;
-            @memcpy(pi[0..ptLen], &Gamma.pointToString());
-            @memcpy(pi[ptLen .. ptLen + cLen], c[cLen..]);
-            @memcpy(pi[ptLen + cLen .. ptLen + cLen + qLen], &s);
+            var h = Hash.init(.{});
+            h.update(suite_string);
+            h.update(proof_to_hash_domain_separator_front);
+            h.update(&D.Gamma.pointToString());
+            h.update(proof_to_hash_domain_separator_back);
+            h.final(&beta_string);
 
-            return pi;
+            return beta_string;
         }
+
+        pub const helper = struct {
+            /// ECVRF Challenge Generation (5.4.3.)
+            ///
+            /// This function takes five points and generates a
+            /// challenge from them by calculating:
+            /// ```
+            /// h = Hash(suite_string || 0x02 || P1 || ... || P5 || 0x00)
+            /// scalar = 0x00 ** (qLen - cLen) || h[0..cLen]
+            /// ```
+            /// The return values is a scalar of qLen bytes.
+            ///
+            /// Note: The LSBytes of the scalar are all set to 0x00, i.e.,
+            /// one can directly use it for arithmetic operations. The
+            /// actual challenge is located in the second half of the
+            /// scalar.
+            pub fn challengeGeneration(
+                p1: Point,
+                p2: Point,
+                p3: Point,
+                p4: Point,
+                p5: Point,
+            ) Curve.scalar.CompressedScalar {
+                const challenge_generation_domain_separator_front = "\x02";
+                const challenge_generation_domain_separator_back = "\x00";
+                var str: [3 + ptLen * 5]u8 = undefined;
+                str[0] = suite_string[0];
+                str[1] = challenge_generation_domain_separator_front[0];
+                @memcpy(str[2 .. 2 + ptLen], &p1.pointToString());
+                @memcpy(str[2 + ptLen .. 2 + ptLen * 2], &p2.pointToString());
+                @memcpy(str[2 + ptLen * 2 .. 2 + ptLen * 3], &p3.pointToString());
+                @memcpy(str[2 + ptLen * 3 .. 2 + ptLen * 4], &p4.pointToString());
+                @memcpy(str[2 + ptLen * 4 .. 2 + ptLen * 5], &p5.pointToString());
+                str[2 + ptLen * 5] = challenge_generation_domain_separator_back[0];
+                var c_string: [Hash.digest_length]u8 = undefined;
+                Hash.hash(&str, &c_string, .{});
+
+                var truncated_c_string: Curve.scalar.CompressedScalar = .{0} ** qLen;
+                @memcpy(truncated_c_string[cLen..], c_string[0..cLen]);
+                return truncated_c_string;
+            }
+        };
     };
+}
 
-    /// The decoded version of a proof Pi.
-    pub const DecodedProof = struct {
-        /// A Point on the Curve
-        Gamma: Point,
-        /// An integer between 0 and 2^(8*cLen)-1
-        c: [qLen]u8,
-        /// An integer between 0 and q-1
-        s: [qLen]u8,
-
-        pub fn decodeProof(pi_string: Pi) !DecodedProof {
-            const gamma_string = pi_string[0..ptLen];
-            const c_string = pi_string[ptLen .. ptLen + cLen];
-            const s_string = pi_string[ptLen + cLen ..];
-            const Gamma = Point.stringToPoint(gamma_string.*) catch {
-                return error.Invalid;
-            };
-            var c: [qLen]u8 = .{0} ** qLen;
-            @memcpy(c[cLen..], c_string);
-            var s: [qLen]u8 = .{0} ** qLen;
-            @memcpy(&s, s_string);
-            Curve.Fe.rejectNonCanonical(s, .big) catch {
-                return error.Invalid;
-            };
-
-            return .{
-                .Gamma = Gamma,
-                .c = c,
-                .s = s,
-            };
-        }
-    };
-
-    /// ECVRF proof to hash
-    ///
-    /// Deterministically obtain the VRF hash output `Beta` directly
-    /// from the proof value `Pi`.
-    ///
-    /// note: `proofToHash` should be run only on a pi_string value that
-    /// is known to have been produced by `prove`, or from within
-    /// `verify` as specified in Section 5.3. of RFC9381.
-    pub fn proofToHash(pi_string: Pi) !Beta {
-        const proof_to_hash_domain_separator_front = "\x03";
-        const proof_to_hash_domain_separator_back = "\x00";
-        const D = try DecodedProof.decodeProof(pi_string);
-        var beta_string: Beta = .{0} ** hLen;
-
+/// ECVRF_encode_to_curve_try_and_increment RFC9381 5.4.1.1
+pub fn ecvrfP256Sha256TaiEncodeToCurve(salt: []const u8, alpha: []const u8, suite_string: []const u8) error{NoCurve}!crypto.ecc.P256 {
+    const Hash = crypto.hash.sha2.Sha256;
+    var ctr: u8 = 0;
+    const encode_to_curve_domain_separator_front = "\x01";
+    const encode_to_curve_domain_separator_back = "\x00";
+    // loop is expected to stop after roughly two iterations!
+    // we allow one iteration less but that's ok... no one
+    // should ever reach this.
+    while (ctr < 255) : (ctr += 1) {
+        const ctr_string: [1]u8 = .{ctr};
         var h = Hash.init(.{});
         h.update(suite_string);
-        h.update(proof_to_hash_domain_separator_front);
-        h.update(&D.Gamma.pointToString());
-        h.update(proof_to_hash_domain_separator_back);
-        h.final(&beta_string);
+        h.update(encode_to_curve_domain_separator_front);
+        h.update(salt);
+        h.update(alpha);
+        h.update(&ctr_string);
+        h.update(encode_to_curve_domain_separator_back);
 
-        return beta_string;
+        var H: [1 + Hash.digest_length]u8 = .{0} ** (1 + Hash.digest_length);
+        H[0] = 0x02;
+        h.final(H[1..]);
+        const pk = crypto.ecc.P256.fromSec1(&H) catch continue;
+        return pk;
     }
 
-    pub const helper = struct {
-        /// ECVRF_encode_to_curve_try_and_increment RFC9381 5.4.1.1
-        pub fn encodeToCurve(salt: []const u8, alpha: []const u8) !Point {
-            var ctr: u8 = 0;
-            const encode_to_curve_domain_separator_front = "\x01";
-            const encode_to_curve_domain_separator_back = "\x00";
-            // loop is expected to stop after roughly two iterations!
-            // we allow one iteration less but that's ok... no one
-            // should ever reach this.
-            while (ctr < 255) : (ctr += 1) {
-                const ctr_string: [1]u8 = .{ctr};
-                var h = Hash.init(.{});
-                h.update(suite_string);
-                h.update(encode_to_curve_domain_separator_front);
-                h.update(salt);
-                h.update(alpha);
-                h.update(&ctr_string);
-                h.update(encode_to_curve_domain_separator_back);
-
-                var H: [ptLen]u8 = .{0} ** ptLen;
-                H[0] = 0x02;
-                h.final(H[1..]);
-                const pk = Point.stringToPoint(H) catch continue;
-                return pk;
-            }
-
-            return error.NoCurve;
-        }
-
-        /// ECVRF Challenge Generation (5.4.3.)
-        ///
-        /// This function takes five points and generates a
-        /// challenge from them by calculating:
-        /// ```
-        /// h = Hash(suite_string || 0x02 || P1 || ... || P5 || 0x00)
-        /// scalar = 0x00 ** (qLen - cLen) || h[0..cLen]
-        /// ```
-        /// The return values is a scalar of qLen bytes.
-        ///
-        /// Note: The LSBytes of the scalar are all set to 0x00, i.e.,
-        /// one can directly use it for arithmetic operations. The
-        /// actual challenge is located in the second half of the
-        /// scalar.
-        pub fn challengeGeneration(
-            p1: Point,
-            p2: Point,
-            p3: Point,
-            p4: Point,
-            p5: Point,
-        ) Curve.scalar.CompressedScalar {
-            const challenge_generation_domain_separator_front = "\x02";
-            const challenge_generation_domain_separator_back = "\x00";
-            var str: [3 + ptLen * 5]u8 = undefined;
-            str[0] = suite_string[0];
-            str[1] = challenge_generation_domain_separator_front[0];
-            @memcpy(str[2 .. 2 + ptLen], &p1.pointToString());
-            @memcpy(str[2 + ptLen .. 2 + ptLen * 2], &p2.pointToString());
-            @memcpy(str[2 + ptLen * 2 .. 2 + ptLen * 3], &p3.pointToString());
-            @memcpy(str[2 + ptLen * 3 .. 2 + ptLen * 4], &p4.pointToString());
-            @memcpy(str[2 + ptLen * 4 .. 2 + ptLen * 5], &p5.pointToString());
-            str[2 + ptLen * 5] = challenge_generation_domain_separator_back[0];
-            var c_string: [Hash.digest_length]u8 = undefined;
-            Hash.hash(&str, &c_string, .{});
-
-            var truncated_c_string: Curve.scalar.CompressedScalar = .{0} ** qLen;
-            @memcpy(truncated_c_string[cLen..], c_string[0..cLen]);
-            return truncated_c_string;
-        }
-    };
-};
+    return error.NoCurve;
+}
 
 test "ECVRF-P256-SHA256-TAI Example 10 with steps" {
     const vrf = EcvrfP256Sha256Tai;
