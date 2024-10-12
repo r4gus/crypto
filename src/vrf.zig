@@ -269,6 +269,8 @@ pub fn Ecvrf(
                 // https://www.secg.org/sec1-v2.pdf
                 const d = Curve.scalar.random(.big);
                 return fromSecretKey(SecretKey{ .bytes = d });
+                // TODO: this is the way defined in the RFC but maybe we should just
+                // use the same algorithm applied by ECDSA in /std/crypto
             }
 
             /// Return the public key corresponding to the secret key.
