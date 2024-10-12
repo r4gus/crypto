@@ -12,9 +12,10 @@ Cryptographic algorithms in [Zig](https://ziglang.org/).
 - Zero-Knowledge Proof
   - [ ] Schnorr Non-interactive Zero-Knowledge Proof [RFC 8235](https://datatracker.ietf.org/doc/html/rfc8235)
 - Deterministic Random Bit Generator (DRBG)
-  - [ ] XDRBG [iacr](https://tosc.iacr.org/index.php/ToSC/article/view/11399)
+  - [x] XDRBG [iacr](https://tosc.iacr.org/index.php/ToSC/article/view/11399)
 
-### Verifiable Random Functions (VRFs)
+<details>
+<summary><ins>Verifiable Random Functions (VRFs)</ins></summary>
 
 A Verifiable Random Function (VRF) [RFC9381](https://datatracker.ietf.org/doc/rfc9381/)
 can be seen as a public-key version of a cryptographic hash function with the following
@@ -85,3 +86,12 @@ if (!std.mem.eql(u8, beta[0..], beta2[0..])) {
 
 Note: the key exchange, as well as the submission of alpha,
 beta and pi are out of scope.
+
+</details>
+
+<details>
+<summary><ins>XDRBG</ins></summary>
+
+TODO
+
+</details>
